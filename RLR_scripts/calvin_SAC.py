@@ -3,6 +3,9 @@ from hydra import initialize, compose
 import time
 import hydra
 import numpy as np
+import argparse
+import os
+import matplotlib.pyplot as plt
 
 from gym import spaces
 import gym
@@ -43,6 +46,8 @@ class SlideEnv(PlayTableSimEnv):
         for the RL algorithm """
         reward = int(self._success()) * 10
         r_info = {'reward': reward}
+        robot_position = self.get_obs()
+        return 5 - dist(robot_position[0:3] , [0.5, 0.5, 0.5]), r_info
         return reward, r_info
 
     def _termination(self):
@@ -87,37 +92,71 @@ class SlideEnv(PlayTableSimEnv):
             info.update(d_info)
             return obs, reward, done, info
 
-with initialize(config_path="./conf/"):
-  cfg = compose(config_name="config_data_collection.yaml", overrides=["cameras=static_and_gripper"])
-  cfg.env["use_egl"] = False
-  cfg.env["show_gui"] = False
-  cfg.env["use_vr"] = False
-  cfg.env["use_scene_info"] = True
-  print(cfg.env)
+def train(save_dir):
+    with initialize(config_path="../../../calvin/calvin_env/conf/"):
+        cfg = compose(config_name="config_data_collection.yaml", overrides=["cameras=static_and_gripper"])
+        cfg.env["use_egl"] = False
+        cfg.env["show_gui"] = False
+        cfg.env["use_vr"] = False
+        cfg.env["use_scene_info"] = True
+        print(cfg.env)
 
-new_env_cfg = {**cfg.env}
-new_env_cfg["tasks"] = cfg.tasks
-new_env_cfg.pop('_target_', None)
-new_env_cfg.pop('_recursive_', None)
-env = SlideEnv(**new_env_cfg)
-log_dir = "/srv/rl2-lab/flash8/mbronars3/workspace/calvin/calvin_env/log_dir"
-model = SAC("MlpPolicy", env, verbose=1, tensorboard_log=log_dir)
+    new_env_cfg = {**cfg.env}
+    new_env_cfg["tasks"] = cfg.tasks
+    new_env_cfg.pop('_target_', None)
+    new_env_cfg.pop('_recursive_', None)
+    env = SlideEnv(**new_env_cfg)
 
-for i in range(30):
-    model.learn(total_timesteps=10000, reset_num_timesteps=False, tb_log_name = "test", log_interval=4)
-    episodes = 10
-    total_score = 0
-    total_steps = 0
-    for episode in range(episodes):
-        obs = env.reset()
-        done = False
-        score = 0
-        steps = 0
-        while not done and steps < 500:
-            obs, reward, done, info = env.step(env.action_space.sample())
-            score += reward
-            steps += 1
-        total_score += score
-        total_steps += steps
-    print(f"Episode: {i + 1}, Avg_Score: {total_score/episodes}, Avg_Steps: {total_steps/episodes}")
-    model.save("sac_slide_time_"+str(i))
+    log_dir = os.path.join(save_dir, "logs")
+    checkpoint_dir = os.path.join(save_dir, "checkpoints")
+
+    model = SAC("MlpPolicy", env, verbose=1, tensorboard_log=log_dir)
+
+    average_returns = []
+    average_steps = []
+    for i in range(1000):
+        model.learn(total_timesteps=10000, reset_num_timesteps=False, tb_log_name = "test", log_interval=4)
+        episodes = 50
+        total_score = 0.0
+        total_steps = 0.0
+        for episode in range(episodes):
+            obs = env.reset()
+            done = False
+            score = 0.0
+            steps = 0.0
+            while not done and steps < 200:
+                obs, reward, done, info = env.step(env.action_space.sample())
+                score += reward/10.0
+                steps += 1
+            total_score += score
+            total_steps += steps
+        average_score = total_score/episodes
+        average_returns.append(average_score)
+        average_steps.append(total_steps/episodes)
+        print(f"Episode: {i + 1}, Avg_Score: {average_score}, Avg_Steps: {total_steps/episodes}")
+        model_name = "sac_slide_time_" + str(i)
+        model.save(os.path.join(checkpoint_dir, model_name))
+        # save image that plots average return vs episode
+        plt.plot(average_returns)
+        plt.xlabel("Episode")
+        plt.ylabel("Average Return")
+        plt.title("Average Return vs Episode")
+        plt.savefig(os.path.join(save_dir, "average_return_vs_episode.png"))
+        plt.close()
+    
+    # save the average returns and average steps
+    np.save(os.path.join(save_dir, "average_returns.npy"), average_returns)
+    np.save(os.path.join(save_dir, "average_steps.npy"), average_steps)
+
+
+if __name__ == "__main__":
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Train a SAC model on the SlideEnv')
+    parser.add_argument('--save_dir', 
+                        type=str, 
+                        required=True,
+                        help='Directory to save the model')
+    
+
+    args = parser.parse_args()
+    train(args.save_dir)

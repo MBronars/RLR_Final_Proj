@@ -164,75 +164,68 @@ class SAC(OffPolicyAlgorithm):
     def _load_offline_data(self) -> None:
         dataset_path = "/srv/rl2-lab/flash8/mbronars3/workspace/calvin/dataset/task_D_D/training"
         buffer_size = self.buffer_size
+        # Get all .npz files in the dataset
         npz_files = [f for f in os.listdir(dataset_path) if f.endswith('.npz')]
+
+        # Format of files is episode_x.npz, order the list by episode number
         npz_files.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
 
-        test_buff = None
-        last_slider_position = 1
-
+        # load in .npy file "ep_start_end_ids.npy"
         ep_start_end_ids = np.load(os.path.join(dataset_path, "ep_start_end_ids.npy"))
-        start_indices = ep_start_end_ids[:, 0]
-        end_indices = ep_start_end_ids[:, 1]
 
-        for i, file_name in enumerate(npz_files):
-            if i in end_indices:
-                continue
-            data = np.load(os.path.join(dataset_path, file_name))
+        avoid_indices = []
 
-            scene_obs = data['scene_obs']
+        # get index of all episodes that are end episodes
+        for i in range(len(ep_start_end_ids)):
+            end_ep = ep_start_end_ids[i][1]
+            # append 0's to beginning until ep_end is 7 digits
+            end_ep = f"{end_ep:07d}"
+            # get index of end episode
+            file_name = f"episode_{end_ep}.npz"
+            avoid_indices.append(npz_files.index(file_name))
+
+        total_episodes = np.arange(len(npz_files))
+        good_indices = np.setdiff1d(total_episodes, avoid_indices)
+
+        # Randomly sample from good_indices
+        sample_size = min(buffer_size, len(good_indices))
+        random_indices = np.random.choice(good_indices, sample_size, replace=False)
+
+        test_data = np.load(os.path.join(dataset_path, npz_files[0]))
+        obs_shape = (len(test_data['robot_obs'][:7]),) #+ len(test_data['scene_obs']), )
+        action_shape = (len(test_data['actions']),)
+        obs_space = spaces.Box(-1, 1, shape = obs_shape, dtype = np.float32)
+        action_space = spaces.Box(-1, 1, shape = action_shape, dtype = np.float32)
+
+
+        test_buff = ReplayBuffer(buffer_size, observation_space = obs_space, action_space = action_space)
+
+
+        for i in random_indices:
+            # get episode number
+            file = npz_files[i]
+            episode = int(file.split('_')[1].split('.')[0])
+
+            data = np.load(os.path.join(dataset_path, file))
+            next_data = np.load(os.path.join(dataset_path, npz_files[i+1]))
+
+            action = data['actions']
             robot_obs = data['robot_obs']
-            actions = data['actions']
+            scene_obs = data['scene_obs']
+            next_robot_obs = next_data['robot_obs']
+            next_scene_obs = next_data['scene_obs']
 
-            current_slider_position = scene_obs[0]  # Assuming slider position is the first element in scene_obs
+            obs = robot_obs[:7] #np.concatenate((robot_obs, scene_obs), axis=-1)
+            next_obs = next_robot_obs[:7] #np.concatenate((next_robot_obs, next_scene_obs), axis=-1)
+        
 
-            # Check if the slider was closed in the last observation and is now open
-            if last_slider_position <= 0.25 and current_slider_position > 0.25:
-                # This is the condition that a relevant movement has occurred
-                # Calculate the range of indices to include in the buffer
-                start = i - 30  # Ensure start is not negative
-                end = i + 1  # Include current observation
-                
+            reward = np.array([1])
+            done = np.array([0])
+            infos = [{}]
 
-                if test_buff is None:
-                    # Initialize buffer with correct shapes
-                    obs_shape = (len(robot_obs[:7]),)
-                    action_shape = (len(actions),)
-                    obs_space = spaces.Box(-1, 1, shape=obs_shape, dtype=np.float32)
-                    action_space = spaces.Box(-1, 1, shape=action_shape, dtype=np.float32)
-                    test_buff = ReplayBuffer(buffer_size, observation_space=obs_space, action_space=action_space)
-
-                #check if there is a start_index or end_index in the range of indices, if so change the start index to that index
-                for j in range(start, end):
-                    if j in start_indices:
-                        start = j
-                    if j in end_indices:
-                        start = j + 1
-
-                for j in range(start, end):
-                    file = npz_files[j]
-                    data = np.load(os.path.join(dataset_path, file))
-                    next_data = np.load(os.path.join(dataset_path, npz_files[j + 1]))
-
-                    actions = data['actions']
-                    robot_obs = data['robot_obs']
-                    scene_obs = data['scene_obs']
-                    next_robot_obs = next_data['robot_obs']
-                    next_scene_obs = next_data['scene_obs']
-
-                    obs = robot_obs[:7]
-                    next_obs = next_robot_obs[:7]
-                    done = np.array([False])
-                    infos = [{'TimeLimit.truncated': False}]
-                    test_buff.add(obs=obs, action=actions, reward=np.ones(1), next_obs=next_obs, done=done, infos=infos)
-
-            last_slider_position = current_slider_position
-
-        if test_buff is not None and test_buff.size() > 0:
-            print("Buffer size:", test_buff.size())
-            print("Sample observation:", test_buff.observations[0])
-            self.offline_buffer = test_buff
-        else:
-            print("No relevant movement detected in any episodes.")
+            test_buff.add(obs = obs, action = action, reward = reward, next_obs = next_obs, done = done, infos = infos)
+        
+        self.offline_buffer = test_buff
 
     def _setup_model(self) -> None:
         super()._setup_model()
