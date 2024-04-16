@@ -12,6 +12,8 @@ import gym
 import numpy as np
 from stable_baselines3 import SAC
 
+import imageio
+
 class SlideEnv(PlayTableSimEnv):
     def __init__(self,
                  tasks: dict = {},
@@ -20,7 +22,7 @@ class SlideEnv(PlayTableSimEnv):
         # For this example we will modify the observation to
         # only retrieve the end effector pose
         self.action_space = spaces.Box(low=-1, high=1, shape=(7,))
-        self.observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(7,))
         # We can use the task utility to know if the task was executed correctly
         self.tasks = hydra.utils.instantiate(tasks)
 
@@ -33,8 +35,9 @@ class SlideEnv(PlayTableSimEnv):
         """Overwrite robot obs to only retrieve end effector position"""
         robot_obs, robot_info = self.robot.get_observation()
         scene_obs = self.scene.get_obs()
-        slide_obs = scene_obs[0]
-        return np.append(robot_obs[:7], slide_obs)
+        slider_obs = scene_obs[0]
+        # append slider observation to robot observation np array
+        return np.append(robot_obs[:7], slider_obs)
 
     def _success(self):
         """ Returns a boolean indicating if the task was performed correctly """
@@ -46,29 +49,8 @@ class SlideEnv(PlayTableSimEnv):
     def _reward(self):
         """ Returns the reward function that will be used 
         for the RL algorithm """
-        #target position
-        target_position = np.array([0.03442367, -0.01258, 0.53350409])  #handle position (right)
-
-        obs = self.get_obs()
-        #current robot position
-        robot_position = np.array(obs[:3])
-
-        slide_position = np.array(obs[-1])
-
-        #calculate the Euclidean distance between the current position and the target
-        distance = np.linalg.norm(robot_position - target_position)
-
-        dist_reward = np.exp(-distance) #or np.exp(-distance / factor)
-
-        success_reward = int(self._success()) * 10
-
-        slide_reward = 30 * slide_position
-
-        reward = dist_reward + success_reward + slide_reward
-
-        #info dictionary to pass additional info if needed
-        r_info = {'distance': distance, 'reward': reward, 'success': self._success()}
-
+        reward = int(self._success()) * 10
+        r_info = {'reward': reward}
         return reward, r_info
 
     def _termination(self):
@@ -112,8 +94,28 @@ class SlideEnv(PlayTableSimEnv):
             info.update(r_info)
             info.update(d_info)
             return obs, reward, done, info
+def capture_frame(env):
+    # Example camera position and orientation
+    camera_pos = [1, 0, 1]  #adjustment 
+    target_pos = [0, 0, 0]  #adjustment
+    up_vector = [0, 0, 1]  # Typically the z-axis is up
 
-def train(save_dir):
+    view_matrix = env.p.computeViewMatrix(
+        cameraEyePosition=camera_pos,
+        cameraTargetPosition=target_pos,
+        cameraUpVector=up_vector
+    )
+
+    projection_matrix = env.p.computeProjectionMatrixFOV(
+        fov=60, aspect=float(640)/480,
+        nearVal=0.1, farVal=100.0
+    )
+
+    _, _, img, _, _ = env.p.getCameraImage(width=640, height=480, viewMatrix=view_matrix, projectionMatrix=projection_matrix, renderer=env.p.ER_BULLET_HARDWARE_OPENGL)
+    return img[:, :, :3]
+
+
+def rollout():
     with initialize(config_path="../../../calvin/calvin_env/conf/"):
         cfg = compose(config_name="config_data_collection.yaml", overrides=["cameras=static_and_gripper"])
         cfg.env["use_egl"] = False
@@ -127,74 +129,43 @@ def train(save_dir):
     new_env_cfg.pop('_target_', None)
     new_env_cfg.pop('_recursive_', None)
     env = SlideEnv(**new_env_cfg)
-
-    log_dir = os.path.join(save_dir, "logs")
-    checkpoint_dir = os.path.join(save_dir, "checkpoints")
+    
+    log_dir = "/srv/rl2-lab/flash8/mbronars3/workspace/RLR/SAC_Task_Buff/temp_logs"
 
     model = SAC("MlpPolicy", env, verbose=1, tensorboard_log=log_dir)
+    model.load("/srv/rl2-lab/flash8/mbronars3/workspace/RLR/SAC_DenseReward/checkpoints/sac_slide_time_5.zip")
 
-    average_returns = []
-    return_indices = []
-    average_rewards = []
-    average_steps = []
-    for i in range(1000):
-        model.learn(total_timesteps=10000, reset_num_timesteps=False, tb_log_name = "test", log_interval=4)
-        episodes = 10
-        total_score = 0.0
-        total_steps = 0.0
-        total_reward = 0.0
-        if i % 1 == 0:
-            for episode in range(episodes):
-                obs = env.reset()
-                done = False
-                score = 0.0
-                steps = 0.0
-                while not done and steps < 200:
-                    obs, reward, done, info = env.step(env.action_space.sample())
-                    score += info['success'] #reward/10.0
-                    reward += reward
-                    steps += 1
-                total_score += score
-                total_steps += steps
-            average_score = total_score/episodes
-            average_reward = reward/episodes
-            return_indices.append(i)
-            average_returns.append(average_score)
-            average_steps.append(total_steps/episodes)
-            print(f"Episode: {i + 1}, Avg_Score: {average_score}, Avg_Steps: {total_steps/episodes}")
-            # save image that plots average return vs episode
-            
-            # plot the average return vs indices
-            plt.plot(return_indices, average_returns)
-            plt.xlabel("Episode")
-            plt.ylabel("Average Success")
-            plt.title("Average Success vs Episode")
-            plt.savefig(os.path.join(save_dir, "average_success_vs_episode.png"))
-            plt.close()
-
-            plt.plot(return_indices, average_rewards)
-            plt.xlabel("Episode")
-            plt.ylabel("Average Reward")
-            plt.title("Average Reward vs Episode")
-            plt.savefig(os.path.join(save_dir, "average_reward_vs_episode.png"))
-            plt.close()
-        if i % 1 == 0:
-            model_name = "sac_slide_time_" + str(i)
-            model.save(os.path.join(checkpoint_dir, model_name))
+    episodes = 1
+    frames = []
+    for episode in range(episodes):
+        #video creation
+        obs = env.reset()
+        done = False
+        counter = 0
+        while not done:
+            action, _ = model.predict(obs)
+            obs, _, done, _ = env.step(action)
+            print(obs[-1])
+            frame= capture_frame(env)
+            frames.append(frame)
+            if counter >= 300:
+                break
+            counter += 1
     
-    # save the average returns and average steps
-    np.save(os.path.join(save_dir, "average_returns.npy"), average_returns)
-    np.save(os.path.join(save_dir, "average_steps.npy"), average_steps)
+    video_path = "/srv/rl2-lab/flash8/mbronars3/workspace/RLR/SAC_Task_Buff/videos/test.mp4"
+    imageio.mimsave(video_path, frames, fps=30)
+    print(f"Video saved at {video_path}")
 
 
 if __name__ == "__main__":
     # Parse arguments
-    parser = argparse.ArgumentParser(description='Train a SAC model on the SlideEnv')
-    parser.add_argument('--save_dir', 
-                        type=str, 
-                        required=True,
-                        help='Directory to save the model')
+    # parser = argparse.ArgumentParser(description='Train a SAC model on the SlideEnv')
+    # parser.add_argument('--save_dir', 
+    #                     type=str, 
+    #                     required=True,
+    #                     help='Directory to save the model')
     
 
-    args = parser.parse_args()
-    train(args.save_dir)
+    # args = parser.parse_args()
+    # train(args.save_dir)
+    rollout()

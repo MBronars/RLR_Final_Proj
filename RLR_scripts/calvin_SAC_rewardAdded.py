@@ -12,6 +12,8 @@ import gym
 import numpy as np
 from stable_baselines3 import SAC
 
+import imageio
+
 class SlideEnv(PlayTableSimEnv):
     def __init__(self,
                  tasks: dict = {},
@@ -20,7 +22,7 @@ class SlideEnv(PlayTableSimEnv):
         # For this example we will modify the observation to
         # only retrieve the end effector pose
         self.action_space = spaces.Box(low=-1, high=1, shape=(7,))
-        self.observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(7,))
         # We can use the task utility to know if the task was executed correctly
         self.tasks = hydra.utils.instantiate(tasks)
 
@@ -33,8 +35,8 @@ class SlideEnv(PlayTableSimEnv):
         """Overwrite robot obs to only retrieve end effector position"""
         robot_obs, robot_info = self.robot.get_observation()
         scene_obs = self.scene.get_obs()
-        slide_obs = scene_obs[0]
-        return np.append(robot_obs[:7], slide_obs)
+        slide_obs = [scene_obs[0]]
+        return robot_obs[:7] + slide_obs
 
     def _success(self):
         """ Returns a boolean indicating if the task was performed correctly """
@@ -67,7 +69,7 @@ class SlideEnv(PlayTableSimEnv):
         reward = dist_reward + success_reward + slide_reward
 
         #info dictionary to pass additional info if needed
-        r_info = {'distance': distance, 'reward': reward, 'success': self._success()}
+        r_info = {'distance': distance, 'reward': reward}
 
         return reward, r_info
 
@@ -112,6 +114,11 @@ class SlideEnv(PlayTableSimEnv):
             info.update(r_info)
             info.update(d_info)
             return obs, reward, done, info
+    
+def capture_frame(env):
+    width, height, img = env.p.getCameraImage(width=640, height=480, renderer=env.p.ER_BULLET_HARDWARE_OPENGL)
+    return img[:, :, :3]
+
 
 def train(save_dir):
     with initialize(config_path="../../../calvin/calvin_env/conf/"):
@@ -134,53 +141,54 @@ def train(save_dir):
     model = SAC("MlpPolicy", env, verbose=1, tensorboard_log=log_dir)
 
     average_returns = []
-    return_indices = []
-    average_rewards = []
     average_steps = []
     for i in range(1000):
         model.learn(total_timesteps=10000, reset_num_timesteps=False, tb_log_name = "test", log_interval=4)
-        episodes = 10
+        episodes = 50
         total_score = 0.0
         total_steps = 0.0
-        total_reward = 0.0
-        if i % 1 == 0:
-            for episode in range(episodes):
-                obs = env.reset()
-                done = False
-                score = 0.0
-                steps = 0.0
-                while not done and steps < 200:
-                    obs, reward, done, info = env.step(env.action_space.sample())
-                    score += info['success'] #reward/10.0
-                    reward += reward
-                    steps += 1
-                total_score += score
-                total_steps += steps
-            average_score = total_score/episodes
-            average_reward = reward/episodes
-            return_indices.append(i)
-            average_returns.append(average_score)
-            average_steps.append(total_steps/episodes)
-            print(f"Episode: {i + 1}, Avg_Score: {average_score}, Avg_Steps: {total_steps/episodes}")
-            # save image that plots average return vs episode
-            
-            # plot the average return vs indices
-            plt.plot(return_indices, average_returns)
-            plt.xlabel("Episode")
-            plt.ylabel("Average Success")
-            plt.title("Average Success vs Episode")
-            plt.savefig(os.path.join(save_dir, "average_success_vs_episode.png"))
-            plt.close()
+        for episode in range(episodes):
+            obs = env.reset()
+            done = False
+            score = 0.0
+            steps = 0.0
+            while not done and steps < 200:
+                obs, reward, done, info = env.step(env.action_space.sample())
+                score += reward/10.0
+                steps += 1
+            total_score += score
+            total_steps += steps
+        average_score = total_score/episodes
+        average_returns.append(average_score)
+        average_steps.append(total_steps/episodes)
+        print(f"Episode: {i + 1}, Avg_Score: {average_score}, Avg_Steps: {total_steps/episodes}")
+        model_name = "sac_slide_time_" + str(i)
+        model.save(os.path.join(checkpoint_dir, model_name))
 
-            plt.plot(return_indices, average_rewards)
-            plt.xlabel("Episode")
-            plt.ylabel("Average Reward")
-            plt.title("Average Reward vs Episode")
-            plt.savefig(os.path.join(save_dir, "average_reward_vs_episode.png"))
-            plt.close()
-        if i % 1 == 0:
-            model_name = "sac_slide_time_" + str(i)
-            model.save(os.path.join(checkpoint_dir, model_name))
+        #video creation
+        frames = []
+        obs = env.reset()
+        done = False
+        while not done:
+            action, _ = model.predict(obs)
+            obs, _, done, _ = env.step(action)
+            frame= capture_frame(env)
+            frames.append(frame)
+            if len(frames) >= 300:
+                break
+        
+        video_path = os.path.join(checkpoint_dir, f"checkpoint_{i+1}.mp4")
+        imageio.mimsave(video_path, frames, fps=30)
+        print(f"Video saved at {video_path}")
+
+
+        # save image that plots average return vs episode
+        plt.plot(average_returns)
+        plt.xlabel("Episode")
+        plt.ylabel("Average Return")
+        plt.title("Average Return vs Episode")
+        plt.savefig(os.path.join(save_dir, "average_return_vs_episode.png"))
+        plt.close()
     
     # save the average returns and average steps
     np.save(os.path.join(save_dir, "average_returns.npy"), average_returns)

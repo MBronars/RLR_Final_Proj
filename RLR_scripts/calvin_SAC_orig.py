@@ -20,7 +20,7 @@ class SlideEnv(PlayTableSimEnv):
         # For this example we will modify the observation to
         # only retrieve the end effector pose
         self.action_space = spaces.Box(low=-1, high=1, shape=(7,))
-        self.observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(7,))
         # We can use the task utility to know if the task was executed correctly
         self.tasks = hydra.utils.instantiate(tasks)
 
@@ -32,9 +32,7 @@ class SlideEnv(PlayTableSimEnv):
     def get_obs(self):
         """Overwrite robot obs to only retrieve end effector position"""
         robot_obs, robot_info = self.robot.get_observation()
-        scene_obs = self.scene.get_obs()
-        slide_obs = scene_obs[0]
-        return np.append(robot_obs[:7], slide_obs)
+        return robot_obs[:7]
 
     def _success(self):
         """ Returns a boolean indicating if the task was performed correctly """
@@ -46,29 +44,10 @@ class SlideEnv(PlayTableSimEnv):
     def _reward(self):
         """ Returns the reward function that will be used 
         for the RL algorithm """
-        #target position
-        target_position = np.array([0.03442367, -0.01258, 0.53350409])  #handle position (right)
-
-        obs = self.get_obs()
-        #current robot position
-        robot_position = np.array(obs[:3])
-
-        slide_position = np.array(obs[-1])
-
-        #calculate the Euclidean distance between the current position and the target
-        distance = np.linalg.norm(robot_position - target_position)
-
-        dist_reward = np.exp(-distance) #or np.exp(-distance / factor)
-
-        success_reward = int(self._success()) * 10
-
-        slide_reward = 30 * slide_position
-
-        reward = dist_reward + success_reward + slide_reward
-
-        #info dictionary to pass additional info if needed
-        r_info = {'distance': distance, 'reward': reward, 'success': self._success()}
-
+        reward = int(self._success()) * 10
+        r_info = {'reward': reward}
+        robot_position = self.get_obs()
+        return 5 - dist(robot_position[0:3] , [0.5, 0.5, 0.5]), r_info
         return reward, r_info
 
     def _termination(self):
@@ -135,15 +114,13 @@ def train(save_dir):
 
     average_returns = []
     return_indices = []
-    average_rewards = []
     average_steps = []
     for i in range(1000):
         model.learn(total_timesteps=10000, reset_num_timesteps=False, tb_log_name = "test", log_interval=4)
-        episodes = 10
+        episodes = 50
         total_score = 0.0
         total_steps = 0.0
-        total_reward = 0.0
-        if i % 1 == 0:
+        if i % 5 == 0:
             for episode in range(episodes):
                 obs = env.reset()
                 done = False
@@ -151,13 +128,11 @@ def train(save_dir):
                 steps = 0.0
                 while not done and steps < 200:
                     obs, reward, done, info = env.step(env.action_space.sample())
-                    score += info['success'] #reward/10.0
-                    reward += reward
+                    score += reward/10.0
                     steps += 1
                 total_score += score
                 total_steps += steps
             average_score = total_score/episodes
-            average_reward = reward/episodes
             return_indices.append(i)
             average_returns.append(average_score)
             average_steps.append(total_steps/episodes)
@@ -167,18 +142,11 @@ def train(save_dir):
             # plot the average return vs indices
             plt.plot(return_indices, average_returns)
             plt.xlabel("Episode")
-            plt.ylabel("Average Success")
-            plt.title("Average Success vs Episode")
-            plt.savefig(os.path.join(save_dir, "average_success_vs_episode.png"))
+            plt.ylabel("Average Return")
+            plt.title("Average Return vs Episode")
+            plt.savefig(os.path.join(save_dir, "average_return_vs_episode.png"))
             plt.close()
-
-            plt.plot(return_indices, average_rewards)
-            plt.xlabel("Episode")
-            plt.ylabel("Average Reward")
-            plt.title("Average Reward vs Episode")
-            plt.savefig(os.path.join(save_dir, "average_reward_vs_episode.png"))
-            plt.close()
-        if i % 1 == 0:
+        if i % 5 == 0:
             model_name = "sac_slide_time_" + str(i)
             model.save(os.path.join(checkpoint_dir, model_name))
     
